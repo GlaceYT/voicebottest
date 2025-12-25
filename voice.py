@@ -301,6 +301,11 @@ async def voice(request: Request):
     name = q.get("name", ["there"])[0]
     phone = q.get("phone", ["unknown"])[0]
     
+    # Clean up phone number
+    phone = phone.strip()
+    if not phone.startswith("+"):
+        phone = "+" + phone.lstrip("+")
+    
     print(f"📞 Incoming call: {name} at {phone}")
 
     if call_semaphore._value <= 0:
@@ -333,6 +338,12 @@ async def voice(request: Request):
 async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("unknown")):
     print(f"🔌 WebSocket connection attempt: {name} at {phone}")
     await call_semaphore.acquire()
+    
+    # Initialize variables that might be used in finally block
+    dg_stt = None
+    dg_tts = None
+    transcript_log = []
+    
     try:
         await ws.accept()
         print(f"✅ WebSocket connected: {name} at {phone}")
@@ -342,8 +353,6 @@ async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("u
             "role": "system",
             "content": SYSTEM_PROMPT.replace("{name}", name)
         }]
-
-        transcript_log = []
         audio_out_queue = asyncio.Queue()
         user_speech_queue = asyncio.Queue()
 
