@@ -156,7 +156,13 @@ def load_leads():
     if not os.path.exists(LEADS_FILE):
         return []
     with open(LEADS_FILE, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        # Normalize keys to lowercase for easier access
+        leads = []
+        for row in reader:
+            normalized = {k.lower(): v for k, v in row.items()}
+            leads.append(normalized)
+        return leads
 
 LEADS = load_leads()
 
@@ -218,25 +224,39 @@ async def call_all():
             return {"error": "No leads found in leads.csv", "leads_count": 0}, 400
         
         call_count = 0
+        errors = []
         for lead in LEADS:
             try:
+                # Get phone number - handle different column name variations
+                phone = lead.get("phone") or lead.get("Phone") or ""
+                name = lead.get("name") or lead.get("Name") or "there"
+                
+                if not phone:
+                    errors.append(f"Lead missing phone number: {lead}")
+                    continue
+                
                 client.calls.create(
-                    to=lead["phone"],
+                    to=phone,
                     from_=SIGNALWIRE_FROM_NUMBER,
-                    url=f"https://{PUBLIC_HOST}/voice?name={lead.get('name', 'there')}&phone={lead.get('phone', 'unknown')}"
+                    url=f"https://{PUBLIC_HOST}/voice?name={name}&phone={phone}"
                 )
                 call_count += 1
                 await asyncio.sleep(1)
             except Exception as e:
-                print(f"Error calling {lead.get('phone', 'unknown')}: {e}")
+                error_msg = f"Error calling {lead.get('phone') or lead.get('Phone', 'unknown')}: {e}"
+                print(error_msg)
+                errors.append(error_msg)
                 continue
         
-        return {
+        result = {
             "status": "batch started",
             "total_leads": len(LEADS),
             "calls_initiated": call_count,
             "message": f"Started calling {call_count} leads"
         }
+        if errors:
+            result["errors"] = errors
+        return result
     except ValueError as e:
         return {"error": str(e)}, 400
     except Exception as e:
