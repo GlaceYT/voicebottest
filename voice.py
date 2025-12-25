@@ -214,6 +214,22 @@ async def call_all_get():
     """Start calling all leads (GET - for browser testing)"""
     return await call_all()
 
+def validate_phone_number(phone):
+    """Validate and normalize phone number to E.164 format"""
+    if not phone:
+        return None
+    # Remove any spaces, dashes, parentheses
+    phone = phone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    # If it doesn't start with +, add it (assuming US number if starts with 1)
+    if not phone.startswith("+"):
+        if phone.startswith("1") and len(phone) == 11:
+            phone = "+" + phone
+        elif len(phone) == 10:
+            phone = "+1" + phone  # Default to US country code
+        else:
+            phone = "+" + phone
+    return phone
+
 async def call_all():
     """Start calling all leads"""
     try:
@@ -222,6 +238,17 @@ async def call_all():
             return {"error": "PUBLIC_HOST environment variable is not set"}, 400
         if not LEADS:
             return {"error": "No leads found in leads.csv", "leads_count": 0}, 400
+        
+        # Validate FROM number
+        if not SIGNALWIRE_FROM_NUMBER:
+            return {"error": "SIGNALWIRE_FROM_NUMBER environment variable is not set"}, 400
+        
+        from_number = validate_phone_number(SIGNALWIRE_FROM_NUMBER)
+        if not from_number:
+            return {
+                "error": "SIGNALWIRE_FROM_NUMBER must be in E.164 format (e.g., +1234567890)",
+                "current_value": SIGNALWIRE_FROM_NUMBER
+            }, 400
         
         call_count = 0
         errors = []
@@ -235,10 +262,16 @@ async def call_all():
                     errors.append(f"Lead missing phone number: {lead}")
                     continue
                 
+                # Normalize phone number to E.164 format
+                normalized_phone = validate_phone_number(phone)
+                if not normalized_phone:
+                    errors.append(f"Invalid phone number format: {phone}")
+                    continue
+                
                 client.calls.create(
-                    to=phone,
-                    from_=SIGNALWIRE_FROM_NUMBER,
-                    url=f"https://{PUBLIC_HOST}/voice?name={name}&phone={phone}"
+                    to=normalized_phone,
+                    from_=from_number,
+                    url=f"https://{PUBLIC_HOST}/voice?name={name}&phone={normalized_phone}"
                 )
                 call_count += 1
                 await asyncio.sleep(1)
