@@ -157,7 +157,6 @@ def load_leads():
         return []
     with open(LEADS_FILE, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        # Normalize keys to lowercase for easier access
         leads = []
         for row in reader:
             normalized = {k.lower(): v for k, v in row.items()}
@@ -218,9 +217,9 @@ def validate_phone_number(phone):
     """Validate and normalize phone number to E.164 format"""
     if not phone:
         return None
-    # Remove any spaces, dashes, parentheses
+ 
     phone = phone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-    # If it doesn't start with +, add it (assuming US number if starts with 1)
+
     if not phone.startswith("+"):
         if phone.startswith("1") and len(phone) == 11:
             phone = "+" + phone
@@ -239,7 +238,7 @@ async def call_all():
         if not LEADS:
             return {"error": "No leads found in leads.csv", "leads_count": 0}, 400
         
-        # Validate FROM number
+       
         if not SIGNALWIRE_FROM_NUMBER:
             return {"error": "SIGNALWIRE_FROM_NUMBER environment variable is not set"}, 400
         
@@ -254,7 +253,7 @@ async def call_all():
         errors = []
         for lead in LEADS:
             try:
-                # Get phone number - handle different column name variations
+               
                 phone = lead.get("phone") or lead.get("Phone") or ""
                 name = lead.get("name") or lead.get("Name") or "there"
                 
@@ -262,7 +261,7 @@ async def call_all():
                     errors.append(f"Lead missing phone number: {lead}")
                     continue
                 
-                # Normalize phone number to E.164 format
+          
                 normalized_phone = validate_phone_number(phone)
                 if not normalized_phone:
                     errors.append(f"Invalid phone number format: {phone}")
@@ -317,13 +316,13 @@ async def voice(request: Request):
         )
 
     from urllib.parse import quote
-    # URL encode the parameters for the websocket URL
+ 
     encoded_name = quote(name)
     encoded_phone = quote(phone)
     stream_url = f"wss://{PUBLIC_HOST}/media?name={encoded_name}&phone={encoded_phone}"
     print(f"✅ Accepting call, connecting to: {stream_url}")
     
-    # Return properly formatted XML (SignalWire expects this exact format)
+
     xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
@@ -345,7 +344,7 @@ async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("u
     print(f"🔌 WebSocket connection attempt: {name} at {phone}")
     await call_semaphore.acquire()
     
-    # Initialize variables that might be used in finally block
+
     dg_stt = None
     dg_tts = None
     transcript_log = []
@@ -416,7 +415,7 @@ async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("u
             speak_response(f"Hi {name}, this is Anna. Can you hear me okay?")
         )
 
-        # Handle incoming messages from SignalWire stream
+ 
         async def receive_messages():
             nonlocal stream_sid, call_active
             try:
@@ -468,7 +467,7 @@ async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("u
             except Exception as e:
                 print(f"Process STT error: {e}")
 
-        # Run message handlers concurrently
+
         receive_task = asyncio.create_task(receive_messages())
         stt_task = asyncio.create_task(process_stt())
 
@@ -477,12 +476,11 @@ async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("u
             if time.time() - call_start_time > MAX_CALL_DURATION:
                 call_active = False
                 break
-            # Check for silence timeout
+      
             if time.time() - last_user_speech_time > MAX_INITIAL_SILENCE and last_user_speech_time == call_start_time:
                 call_active = False
                 break
 
-        # Cancel tasks
         receive_task.cancel()
         stt_task.cancel()
         try:
