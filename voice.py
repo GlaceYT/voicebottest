@@ -199,20 +199,44 @@ async def classify_call(transcript):
 # ======================================================
 
 @app.post("/call-all")
+async def call_all_post():
+    """Start calling all leads (POST)"""
+    return await call_all()
+
+@app.get("/call-all")
+async def call_all_get():
+    """Start calling all leads (GET - for browser testing)"""
+    return await call_all()
+
 async def call_all():
     """Start calling all leads"""
     try:
         client = get_signalwire_client()
         if not PUBLIC_HOST:
             return {"error": "PUBLIC_HOST environment variable is not set"}, 400
+        if not LEADS:
+            return {"error": "No leads found in leads.csv", "leads_count": 0}, 400
+        
+        call_count = 0
         for lead in LEADS:
-            client.calls.create(
-                to=lead["phone"],
-                from_=SIGNALWIRE_FROM_NUMBER,
-                url=f"https://{PUBLIC_HOST}/voice?name={lead['name']}&phone={lead['phone']}"
-            )
-            await asyncio.sleep(1)
-        return {"status": "batch started"}
+            try:
+                client.calls.create(
+                    to=lead["phone"],
+                    from_=SIGNALWIRE_FROM_NUMBER,
+                    url=f"https://{PUBLIC_HOST}/voice?name={lead.get('name', 'there')}&phone={lead.get('phone', 'unknown')}"
+                )
+                call_count += 1
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Error calling {lead.get('phone', 'unknown')}: {e}")
+                continue
+        
+        return {
+            "status": "batch started",
+            "total_leads": len(LEADS),
+            "calls_initiated": call_count,
+            "message": f"Started calling {call_count} leads"
+        }
     except ValueError as e:
         return {"error": str(e)}, 400
     except Exception as e:
