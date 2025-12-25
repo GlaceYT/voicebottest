@@ -88,6 +88,30 @@ app = FastAPI()
 call_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
 
 # ======================================================
+# ENVIRONMENT VALIDATION
+# ======================================================
+
+def validate_env():
+    required_vars = [
+        "SIGNALWIRE_PROJECT_ID",
+        "SIGNALWIRE_TOKEN", 
+        "SIGNALWIRE_SPACE_URL",
+        "SIGNALWIRE_FROM_NUMBER",
+        "OPENAI_API_KEY",
+        "DEEPGRAM_API_KEY",
+        "PUBLIC_HOST"
+    ]
+    missing = [var for var in required_vars if not os.getenv(var)]
+    if missing:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+# Validate on import (but allow graceful handling)
+try:
+    validate_env()
+except ValueError as e:
+    print(f"Warning: {e}")
+
+# ======================================================
 # DATA PERSISTENCE
 # ======================================================
 
@@ -251,12 +275,109 @@ async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("u
             speak_response(f"Hi {name}, this is Anna. Can you hear me okay?")
         )
 
+        # Handle incoming messages from SignalWire stream
+        async def receive_messages():
+            nonlocal stream_sid, call_active
+            try:
+                while call_active:
+                    try:
+                        data = await asyncio.wait_for(ws.receive_json(), timeout=0.5)
+                        if data.get("event") == "start":
+                            stream_sid = data.get("start", {}).get("streamSid")
+                        elif data.get("event") == "media":
+                            # Forward audio to Deepgram STT
+                            media_payload = data.get("media", {}).get("payload", "")
+                            if media_payload:
+                                audio_bytes = base64.b64decode(media_payload)
+                                await dg_stt.send(audio_bytes)
+                        elif data.get("event") == "stop":
+                            call_active = False
+                            break
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception as e:
+                        print(f"Error receiving message: {e}")
+                        break
+            except Exception as e:
+                print(f"Receive messages error: {e}")
+
+        # Handle Deepgram STT responses
+        async def process_stt():
+            nonlocal last_user_speech_time
+            try:
+                while call_active:
+                    try:
+                        msg = await asyncio.wait_for(dg_stt.recv(), timeout=0.5)
+                        if isinstance(msg, str):
+                            result = json.loads(msg)
+                            if result.get("type") == "Results":
+                                transcript = result.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "")
+                                if transcript:
+                                    transcript_log.append(f"User: {transcript}")
+                                    conversation.append({"role": "user", "content": transcript})
+                                    last_user_speech_time = time.time()
+                                    # Generate AI response
+                                    if time.time() - last_ai_turn_time > SILENCE_TIMEOUT:
+                                        await generate_and_speak()
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception as e:
+                        print(f"Error processing STT: {e}")
+                        break
+            except Exception as e:
+                print(f"Process STT error: {e}")
+
+        # Run message handlers concurrently
+        receive_task = asyncio.create_task(receive_messages())
+        stt_task = asyncio.create_task(process_stt())
+
         while call_active:
             await asyncio.sleep(0.1)
             if time.time() - call_start_time > MAX_CALL_DURATION:
+                call_active = False
+                break
+            # Check for silence timeout
+            if time.time() - last_user_speech_time > MAX_INITIAL_SILENCE and last_user_speech_time == call_start_time:
+                call_active = False
                 break
 
+        # Cancel tasks
+        receive_task.cancel()
+        stt_task.cancel()
+        try:
+            await receive_task
+            await stt_task
+        except asyncio.CancelledError:
+            pass
+
     finally:
+        try:
+            await dg_stt.close()
+            await dg_tts.close()
+        except:
+            pass
         label = await classify_call("\n".join(transcript_log))
         save_result(phone, name, "\n".join(transcript_log), label)
         call_semaphore.release()
+
+# ======================================================
+# STARTUP & HEALTH CHECK
+# ======================================================
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "voicebot"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+# ======================================================
+# MAIN ENTRY POINT FOR RAILWAY
+# ======================================================
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    host = os.getenv("HOST", "0.0.0.0")
+    uvicorn.run(app, host=host, port=port)
