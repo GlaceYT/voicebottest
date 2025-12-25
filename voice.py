@@ -300,19 +300,25 @@ async def voice(request: Request):
     q = parse_qs(request.url.query)
     name = q.get("name", ["there"])[0]
     phone = q.get("phone", ["unknown"])[0]
+    
+    print(f"📞 Incoming call: {name} at {phone}")
 
     if call_semaphore._value <= 0:
+        print(f"❌ Call rejected: Too many concurrent calls")
         save_result(phone, name, "", "busy")
         return Response(
             content='<Response><Reject reason="busy" /></Response>',
             media_type="application/xml"
         )
 
+    stream_url = f"wss://{PUBLIC_HOST}/media?name={name}&phone={phone}"
+    print(f"✅ Accepting call, connecting to: {stream_url}")
+    
     return Response(
         content=f"""
         <Response>
             <Connect>
-                <Stream url="wss://{PUBLIC_HOST}/media?name={name}&phone={phone}" />
+                <Stream url="{stream_url}" />
             </Connect>
         </Response>
         """,
@@ -325,9 +331,11 @@ async def voice(request: Request):
 
 @app.websocket("/media")
 async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("unknown")):
+    print(f"🔌 WebSocket connection attempt: {name} at {phone}")
     await call_semaphore.acquire()
     try:
         await ws.accept()
+        print(f"✅ WebSocket connected: {name} at {phone}")
         stream_sid = None
 
         conversation = [{
@@ -388,6 +396,7 @@ async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("u
             last_ai_turn_time = time.time()
             await speak_response(ai_text)
 
+        print(f"🎤 Starting AI conversation with {name}")
         speaking_task = asyncio.create_task(
             speak_response(f"Hi {name}, this is Anna. Can you hear me okay?")
         )
@@ -473,9 +482,15 @@ async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("u
             await dg_tts.close()
         except:
             pass
-        label = await classify_call("\n".join(transcript_log))
-        save_result(phone, name, "\n".join(transcript_log), label)
+        transcript = "\n".join(transcript_log)
+        label = await classify_call(transcript)
+        print(f"📝 Call ended with {name} ({phone})")
+        print(f"📊 Classification: {label}")
+        if transcript:
+            print(f"💬 Transcript:\n{transcript}")
+        save_result(phone, name, transcript, label)
         call_semaphore.release()
+        print(f"✅ Call completed and results saved")
 
 # ======================================================
 # STARTUP & HEALTH CHECK
