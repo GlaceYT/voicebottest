@@ -99,8 +99,18 @@ def get_signalwire_client():
         )
     return sw_client
 
-app = FastAPI()
+app = FastAPI(title="VoiceBot API", version="1.0.0")
 call_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
+
+# Add global exception handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch all exceptions and return proper error response"""
+    return {
+        "error": "Internal server error",
+        "message": str(exc),
+        "path": str(request.url.path)
+    }, 500
 
 # ======================================================
 # ENVIRONMENT VALIDATION
@@ -190,15 +200,23 @@ async def classify_call(transcript):
 
 @app.post("/call-all")
 async def call_all():
-    client = get_signalwire_client()
-    for lead in LEADS:
-        client.calls.create(
-            to=lead["phone"],
-            from_=SIGNALWIRE_FROM_NUMBER,
-            url=f"https://{PUBLIC_HOST}/voice?name={lead['name']}&phone={lead['phone']}"
-        )
-        await asyncio.sleep(1)
-    return {"status": "batch started"}
+    """Start calling all leads"""
+    try:
+        client = get_signalwire_client()
+        if not PUBLIC_HOST:
+            return {"error": "PUBLIC_HOST environment variable is not set"}, 400
+        for lead in LEADS:
+            client.calls.create(
+                to=lead["phone"],
+                from_=SIGNALWIRE_FROM_NUMBER,
+                url=f"https://{PUBLIC_HOST}/voice?name={lead['name']}&phone={lead['phone']}"
+            )
+            await asyncio.sleep(1)
+        return {"status": "batch started"}
+    except ValueError as e:
+        return {"error": str(e)}, 400
+    except Exception as e:
+        return {"error": f"Failed to start calls: {str(e)}"}, 500
 
 @app.post("/voice")
 async def voice(request: Request):
@@ -388,11 +406,27 @@ async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("u
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "voicebot"}
+    """Root endpoint - always works"""
+    return {"status": "ok", "service": "voicebot", "message": "API is running"}
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    """Health check endpoint for Railway"""
+    try:
+        missing = validate_env()
+        return {
+            "status": "healthy",
+            "app": "running",
+            "missing_env_vars": len(missing),
+            "warnings": missing if missing else None
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}, 500
+
+@app.get("/ping")
+async def ping():
+    """Simple ping endpoint for testing"""
+    return {"pong": True, "timestamp": datetime.utcnow().isoformat()}
 
 # ======================================================
 # MAIN ENTRY POINT FOR RAILWAY
