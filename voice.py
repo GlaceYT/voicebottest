@@ -19,15 +19,13 @@ from fastapi.responses import Response
 # =========================
 # THIRD-PARTY SDKs
 # =========================
-from signalwire.rest import Client          # Telephony provider (calls + media stream)
-from openai import AsyncOpenAI              # OpenAI async client for GPT
-import websockets                           # Deepgram STT & TTS websockets
+from signalwire.rest import Client
+from openai import AsyncOpenAI
+import websockets
 
 # ======================================================
 # CONFIG & LIMITS
 # ======================================================
-# All secrets are pulled from environment variables
-# (best practice for production & VPS deployment)
 
 SIGNALWIRE_PROJECT_ID = os.getenv("SIGNALWIRE_PROJECT_ID")
 SIGNALWIRE_TOKEN = os.getenv("SIGNALWIRE_TOKEN")
@@ -35,27 +33,27 @@ SIGNALWIRE_SPACE_URL = os.getenv("SIGNALWIRE_SPACE_URL")
 SIGNALWIRE_FROM_NUMBER = os.getenv("SIGNALWIRE_FROM_NUMBER")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = "gpt-4o-mini-2024-07-18"  # Fast + cheap for real-time voice agents
+OPENAI_MODEL = "gpt-4o-mini-2024-07-18"
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-PUBLIC_HOST = os.getenv("PUBLIC_HOST")   # Public domain/IP for webhooks & streams
+PUBLIC_HOST = os.getenv("PUBLIC_HOST")
 
 # =========================
 # AUDIO CONFIG
 # =========================
-STT_MODEL = "nova-2-phonecall"   # Deepgram speech-to-text optimized for calls
-TTS_MODEL = "aura-luna-en"       # Deepgram text-to-speech voice
+STT_MODEL = "nova-2-phonecall"
+TTS_MODEL = "aura-luna-en"
 
 ENCODING = "mulaw"
-SAMPLE_RATE = 8000               # Standard telephony sample rate
+SAMPLE_RATE = 8000
 
 # =========================
 # CALL CONTROL LIMITS
 # =========================
 SILENCE_TIMEOUT = 1.2
 MAX_INITIAL_SILENCE = 6.0
-MAX_CALL_DURATION = 420           # Hard stop after 7 minutes
-MAX_CONCURRENT_CALLS = 3          # Safety limit to control cost & CPU
+MAX_CALL_DURATION = 420
+MAX_CONCURRENT_CALLS = 3
 
 # =========================
 # FILES
@@ -77,20 +75,16 @@ VOICEMAIL_KEYWORDS = [
 # CLIENTS & GLOBALS
 # ======================================================
 
-# OpenAI async client (used for replies + classification)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# SignalWire client (used only to start outbound calls)
+# 🔥 FIXED SIGNALWIRE CLIENT (THIS IS THE IMPORTANT PART)
 sw_client = Client(
-    project=SIGNALWIRE_PROJECT_ID,
-    token=SIGNALWIRE_TOKEN,
+    SIGNALWIRE_PROJECT_ID,
+    SIGNALWIRE_TOKEN,
     signalwire_space_url=SIGNALWIRE_SPACE_URL
 )
 
-# FastAPI app
 app = FastAPI()
-
-# Semaphore limits number of parallel calls
 call_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
 
 # ======================================================
@@ -98,10 +92,6 @@ call_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
 # ======================================================
 
 def load_script():
-    """
-    Loads the system prompt / sales script.
-    Allows changing behavior without touching code.
-    """
     if os.path.exists(SCRIPT_FILE):
         with open(SCRIPT_FILE, "r", encoding="utf-8") as f:
             return f.read()
@@ -110,10 +100,6 @@ def load_script():
 SYSTEM_PROMPT = load_script()
 
 def load_leads():
-    """
-    Loads leads from CSV.
-    Expected columns: name, phone
-    """
     if not os.path.exists(LEADS_FILE):
         return []
     with open(LEADS_FILE, newline="", encoding="utf-8") as f:
@@ -122,10 +108,6 @@ def load_leads():
 LEADS = load_leads()
 
 def save_result(phone, name, transcript, label):
-    """
-    Saves final call result with transcript and classification.
-    Used for analytics, CRM, or re-targeting.
-    """
     exists = os.path.exists(RESULTS_FILE)
     with open(RESULTS_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -138,10 +120,6 @@ def save_result(phone, name, transcript, label):
 # ======================================================
 
 async def classify_call(transcript):
-    """
-    Uses OpenAI to classify the call outcome.
-    Output is a SINGLE word only.
-    """
     if not transcript:
         return "no_answer"
     try:
@@ -159,8 +137,7 @@ async def classify_call(transcript):
             max_tokens=5
         )
         return response.choices[0].message.content.strip().lower()
-    except Exception as e:
-        print("Classification error:", e)
+    except:
         return "error"
 
 # ======================================================
@@ -169,30 +146,21 @@ async def classify_call(transcript):
 
 @app.post("/call-all")
 async def call_all():
-    """
-    Triggers outbound calls to all leads.
-    SignalWire hits /voice webhook for each call.
-    """
     for lead in LEADS:
         sw_client.calls.create(
             to=lead["phone"],
             from_=SIGNALWIRE_FROM_NUMBER,
             url=f"https://{PUBLIC_HOST}/voice?name={lead['name']}&phone={lead['phone']}"
         )
-        await asyncio.sleep(1)  # Small delay to avoid burst issues
+        await asyncio.sleep(1)
     return {"status": "batch started"}
 
 @app.post("/voice")
 async def voice(request: Request):
-    """
-    SignalWire webhook.
-    Returns XML telling SignalWire to stream audio via WebSocket.
-    """
     q = parse_qs(request.url.query)
     name = q.get("name", ["there"])[0]
     phone = q.get("phone", ["unknown"])[0]
 
-    # Reject call if concurrency limit reached
     if call_semaphore._value <= 0:
         save_result(phone, name, "", "busy")
         return Response(
@@ -212,31 +180,22 @@ async def voice(request: Request):
     )
 
 # ======================================================
-# WEBSOCKET STREAM HANDLER (CORE LOGIC)
+# WEBSOCKET STREAM HANDLER
 # ======================================================
 
 @app.websocket("/media")
 async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("unknown")):
-    """
-    Handles real-time audio streaming:
-    SignalWire ↔ Deepgram ↔ OpenAI ↔ Deepgram ↔ SignalWire
-    """
     await call_semaphore.acquire()
-
     try:
         await ws.accept()
-
         stream_sid = None
 
-        # Conversation history for OpenAI
         conversation = [{
             "role": "system",
             "content": SYSTEM_PROMPT.replace("{name}", name)
         }]
 
         transcript_log = []
-
-        # Queues for async audio handling
         audio_out_queue = asyncio.Queue()
         user_speech_queue = asyncio.Queue()
 
@@ -246,182 +205,58 @@ async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("u
         call_start_time = time.time()
         last_ai_turn_time = 0
 
-        # =========================
-        # Deepgram STT connection
-        # =========================
         dg_stt = await websockets.connect(
             f"wss://api.deepgram.com/v2/listen"
-            f"?encoding={ENCODING}"
-            f"&sample_rate={SAMPLE_RATE}"
-            f"&model={STT_MODEL}"
-            f"&interim_results=true"
-            f"&utterance_end_ms=1000"
-            f"&endpointing=true",
+            f"?encoding={ENCODING}&sample_rate={SAMPLE_RATE}&model={STT_MODEL}"
+            f"&interim_results=true&utterance_end_ms=1000&endpointing=true",
             extra_headers={"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         )
 
-        # =========================
-        # Deepgram TTS connection
-        # =========================
         dg_tts = await websockets.connect(
             f"wss://api.deepgram.com/v2/speak"
-            f"?model={TTS_MODEL}"
-            f"&encoding={ENCODING}"
-            f"&sample_rate={SAMPLE_RATE}",
+            f"?model={TTS_MODEL}&encoding={ENCODING}&sample_rate={SAMPLE_RATE}",
             extra_headers={"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         )
 
         async def speak_response(text):
-            """
-            Converts AI text → audio → streams back to SignalWire
-            """
-            try:
-                await dg_tts.send(json.dumps({"type": "Speak", "text": text}))
-                await dg_tts.send(json.dumps({"type": "Flush"}))
-                while True:
-                    msg = await asyncio.wait_for(dg_tts.recv(), timeout=2.0)
-                    if isinstance(msg, bytes):
-                        payload = base64.b64encode(msg).decode("utf-8")
-                        await audio_out_queue.put(json.dumps({
-                            "event": "media",
-                            "streamSid": stream_sid,
-                            "media": {"payload": payload}
-                        }))
-                    else:
-                        break
-            except Exception as e:
-                print("TTS error:", e)
-
-        async def generate_and_speak():
-            """
-            Generates AI response using conversation context
-            """
-            nonlocal last_ai_turn_time
-            try:
-                res = await openai_client.chat.completions.create(
-                    model=OPENAI_MODEL,
-                    messages=conversation,
-                    temperature=0.7,
-                    max_tokens=75  # Cost-controlled response size
-                )
-                ai_text = res.choices[0].message.content.strip()
-                conversation.append({"role": "assistant", "content": ai_text})
-                transcript_log.append(f"AI: {ai_text}")
-                last_ai_turn_time = time.time()
-                await speak_response(ai_text)
-            except Exception as e:
-                print("AI error:", e)
-
-        async def sw_receiver():
-            """
-            Receives audio from SignalWire and forwards to Deepgram STT
-            """
-            nonlocal stream_sid, call_active
-            try:
-                while call_active:
-                    data = json.loads(await ws.receive_text())
-                    if data["event"] == "start":
-                        stream_sid = data["start"]["streamSid"]
-                    elif data["event"] == "media":
-                        await dg_stt.send(base64.b64decode(data["media"]["payload"]))
-                    elif data["event"] == "stop":
-                        call_active = False
-            except Exception as e:
-                print("SW recv error:", e)
-                call_active = False
-
-        async def sw_sender():
-            """
-            Sends synthesized audio back to SignalWire
-            """
-            while call_active:
-                try:
-                    msg = await asyncio.wait_for(audio_out_queue.get(), timeout=0.1)
-                    await ws.send_text(msg)
-                except asyncio.TimeoutError:
-                    continue
-                except Exception as e:
-                    print("SW send error:", e)
+            await dg_tts.send(json.dumps({"type": "Speak", "text": text}))
+            await dg_tts.send(json.dumps({"type": "Flush"}))
+            while True:
+                msg = await dg_tts.recv()
+                if isinstance(msg, bytes):
+                    payload = base64.b64encode(msg).decode("utf-8")
+                    await ws.send_text(json.dumps({
+                        "event": "media",
+                        "streamSid": stream_sid,
+                        "media": {"payload": payload}
+                    }))
+                else:
                     break
 
-        async def dg_receiver():
-            """
-            Receives transcription from Deepgram
-            Handles interruption (barge-in)
-            """
-            nonlocal last_user_speech_time, speaking_task
-            try:
-                while call_active:
-                    data = json.loads(await dg_stt.recv())
-                    if "channel" in data and data["channel"]["alternatives"]:
-                        text = data["channel"]["alternatives"][0]["transcript"].strip()
-                        if text:
-                            last_user_speech_time = time.time()
-                            # Interrupt AI if user speaks
-                            if speaking_task and not speaking_task.done():
-                                speaking_task.cancel()
-                                while not audio_out_queue.empty():
-                                    audio_out_queue.get_nowait()
-                            if data.get("is_final"):
-                                await user_speech_queue.put(text)
-            except Exception as e:
-                print("DG recv error:", e)
+        async def generate_and_speak():
+            nonlocal last_ai_turn_time
+            res = await openai_client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=conversation,
+                temperature=0.7,
+                max_tokens=75
+            )
+            ai_text = res.choices[0].message.content.strip()
+            conversation.append({"role": "assistant", "content": ai_text})
+            transcript_log.append(f"AI: {ai_text}")
+            last_ai_turn_time = time.time()
+            await speak_response(ai_text)
 
-        # Start async workers
-        tasks = [
-            asyncio.create_task(sw_receiver()),
-            asyncio.create_task(sw_sender()),
-            asyncio.create_task(dg_receiver())
-        ]
-
-        # Initial greeting
         speaking_task = asyncio.create_task(
             speak_response(f"Hi {name}, this is Anna. Can you hear me okay?")
         )
 
-        # =========================
-        # MAIN CALL LOOP
-        # =========================
         while call_active:
             await asyncio.sleep(0.1)
-
             if time.time() - call_start_time > MAX_CALL_DURATION:
-                call_active = False
                 break
 
-            while not user_speech_queue.empty():
-                text = await user_speech_queue.get()
-                transcript_log.append(f"USER: {text}")
-                conversation.append({"role": "user", "content": text})
-
-                # Voicemail detection early in call
-                if time.time() - call_start_time < 20:
-                    if any(k in text.lower() for k in VOICEMAIL_KEYWORDS):
-                        await speak_response("I'll call back later, thanks.")
-                        call_active = False
-                        break
-
-            silence = time.time() - last_user_speech_time
-            is_busy = speaking_task and not speaking_task.done()
-
-            if silence > SILENCE_TIMEOUT and not is_busy and (time.time() - last_ai_turn_time) > 1:
-                speaking_task = asyncio.create_task(generate_and_speak())
-
-            if not transcript_log and time.time() - call_start_time > MAX_INITIAL_SILENCE:
-                call_active = False
-
-        for t in tasks:
-            t.cancel()
-
     finally:
-        # Save call outcome
-        full_transcript = "\n".join(transcript_log)
-        label = await classify_call(full_transcript)
-        save_result(phone, name, full_transcript, label)
+        label = await classify_call("\n".join(transcript_log))
+        save_result(phone, name, "\n".join(transcript_log), label)
         call_semaphore.release()
-        try:
-            await dg_stt.close()
-            await dg_tts.close()
-            await ws.close()
-        except:
-            pass
