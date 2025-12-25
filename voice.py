@@ -316,17 +316,23 @@ async def voice(request: Request):
             media_type="application/xml"
         )
 
-    stream_url = f"wss://{PUBLIC_HOST}/media?name={name}&phone={phone}"
+    from urllib.parse import quote
+    # URL encode the parameters for the websocket URL
+    encoded_name = quote(name)
+    encoded_phone = quote(phone)
+    stream_url = f"wss://{PUBLIC_HOST}/media?name={encoded_name}&phone={encoded_phone}"
     print(f"✅ Accepting call, connecting to: {stream_url}")
     
+    # Return properly formatted XML (SignalWire expects this exact format)
+    xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="{stream_url}" />
+    </Connect>
+</Response>"""
+    
     return Response(
-        content=f"""
-        <Response>
-            <Connect>
-                <Stream url="{stream_url}" />
-            </Connect>
-        </Response>
-        """,
+        content=xml_response,
         media_type="application/xml"
     )
 
