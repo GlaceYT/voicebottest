@@ -75,14 +75,29 @@ VOICEMAIL_KEYWORDS = [
 # CLIENTS & GLOBALS
 # ======================================================
 
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+# Initialize clients lazily to avoid crashes on import
+openai_client = None
+sw_client = None
 
-# 🔥 FIXED SIGNALWIRE CLIENT (THIS IS THE IMPORTANT PART)
-sw_client = Client(
-    SIGNALWIRE_PROJECT_ID,
-    SIGNALWIRE_TOKEN,
-    signalwire_space_url=SIGNALWIRE_SPACE_URL
-)
+def get_openai_client():
+    global openai_client
+    if openai_client is None:
+        if not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY environment variable is not set")
+        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    return openai_client
+
+def get_signalwire_client():
+    global sw_client
+    if sw_client is None:
+        if not all([SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, SIGNALWIRE_SPACE_URL]):
+            raise ValueError("SignalWire environment variables are not set")
+        sw_client = Client(
+            SIGNALWIRE_PROJECT_ID,
+            SIGNALWIRE_TOKEN,
+            signalwire_space_url=SIGNALWIRE_SPACE_URL
+        )
+    return sw_client
 
 app = FastAPI()
 call_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
@@ -92,6 +107,7 @@ call_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
 # ======================================================
 
 def validate_env():
+    """Validate environment variables. Returns list of missing vars."""
     required_vars = [
         "SIGNALWIRE_PROJECT_ID",
         "SIGNALWIRE_TOKEN", 
@@ -102,14 +118,17 @@ def validate_env():
         "PUBLIC_HOST"
     ]
     missing = [var for var in required_vars if not os.getenv(var)]
-    if missing:
-        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+    return missing
 
-# Validate on import (but allow graceful handling)
-try:
-    validate_env()
-except ValueError as e:
-    print(f"Warning: {e}")
+@app.on_event("startup")
+async def startup_event():
+    """Validate environment on startup and log warnings."""
+    missing = validate_env()
+    if missing:
+        print(f"⚠️  Warning: Missing environment variables: {', '.join(missing)}")
+        print("⚠️  The app will start but some features may not work.")
+    else:
+        print("✅ All required environment variables are set.")
 
 # ======================================================
 # DATA PERSISTENCE
@@ -147,7 +166,8 @@ async def classify_call(transcript):
     if not transcript:
         return "no_answer"
     try:
-        response = await openai_client.chat.completions.create(
+        client = get_openai_client()
+        response = await client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[{
                 "role": "user",
@@ -170,8 +190,9 @@ async def classify_call(transcript):
 
 @app.post("/call-all")
 async def call_all():
+    client = get_signalwire_client()
     for lead in LEADS:
-        sw_client.calls.create(
+        client.calls.create(
             to=lead["phone"],
             from_=SIGNALWIRE_FROM_NUMBER,
             url=f"https://{PUBLIC_HOST}/voice?name={lead['name']}&phone={lead['phone']}"
@@ -259,7 +280,8 @@ async def media(ws: WebSocket, name: str = Query("there"), phone: str = Query("u
 
         async def generate_and_speak():
             nonlocal last_ai_turn_time
-            res = await openai_client.chat.completions.create(
+            client = get_openai_client()
+            res = await client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=conversation,
                 temperature=0.7,
